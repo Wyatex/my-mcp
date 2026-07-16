@@ -20,6 +20,6 @@ RUN cargo build --release
 
 # 运行阶段
 FROM gcr.io/distroless/static-debian12:latest
-COPY --from=builder /app/target/release/kimi-mcp-rust /app/kimi-mcp-rust
+COPY --from=builder /app/target/release/my-mcp /app/my-mcp
 EXPOSE 3000
-CMD ["/app/kimi-mcp-rust"]
+CMD ["/app/my-mcp"]
