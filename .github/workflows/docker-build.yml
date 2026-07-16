@@ -1,0 +1,134 @@
+name: Build and Push Docker Image
+
+# 触发条件
+on:
+  push:
+    branches: [ "main", "master" ]
+    # 如果你打 Tag，比如 v1.0.0，也会触发构建
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+# 定义环境变量
+env:
+  # 默认推送到 GitHub 自带的容器镜像仓库 (GHCR)
+  REGISTRY: ghcr.io
+  # 镜像名称，默认为 "你的用户名/仓库名" (要求全部小写)
+  IMAGE_NAME: ${{ github.repository }}
+  APP_NAME: my-mcp
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    # 授予 GitHub 令牌推送镜像包的权限
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # 1. 拉取代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. 设置 Docker Buildx (支持多架构和高级缓存)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 3. 登录到 GitHub 容器镜像仓库 (如果是 PR 则不登录)
+      - name: Log in to the Container registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 4. 自动生成镜像的 Tag 和 Labels
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # 针对 push 到主分支，打上 latest 标签
+            type=raw,value=latest,enable={{is_default_branch}}
+            # 针对 git tag，比如 v1.0.0 打上对应的版本标签
+            type=ref,event=tag
+            # 针对 PR，使用 PR 编号
+            type=ref,event=pr
+            # 使用 commit 的简短 hash
+            type=sha
+
+      # 5. 构建并推送 Docker 镜像
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          # 如果是 PR，只测试构建不推送；如果是 push 或 tag，则推送
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 【核心配置】使用 GitHub Actions 原生缓存！这能让你之前的假 main.rs 发挥巨大作用！
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+  
+  # ==========================================
+  # Job 2: 跨平台编译 (Win, Linux, macOS)
+  # ==========================================
+  build-binaries:
+    name: Build on ${{ matrix.os_name }}
+    # 使用 matrix 矩阵策略，同时在三大主流系统上运行
+    runs-on: ${{ matrix.os }}
+    # 授予 Release 权限（用于自动上传构建好的文件）
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            os_name: linux
+            suffix: ''
+          - os: windows-latest
+            os_name: windows
+            suffix: '.exe'
+          - os: macos-latest
+            os_name: macos
+            suffix: ''
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # 【核心配置】Rust 原生缓存，极大加快二次编译速度
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Release Binary
+        run: cargo build --release
+
+      # 统一重命名和收集编译产物（利用 bash 兼容所有系统）
+      - name: Prepare Artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/${{ env.APP_NAME }}${{ matrix.suffix }} dist/${{ env.APP_NAME }}-${{ matrix.os_name }}${{ matrix.suffix }}
+
+      # 上传到 Actions 的 Artifacts (即使不打 Tag 也能在网页上下载测试)
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ matrix.os_name }}
+          path: dist/${{ env.APP_NAME }}-${{ matrix.os_name }}${{ matrix.suffix }}
+          retention-days: 7
+
+      # 【加分项】如果是打 tag 触发的 (如 v1.0.0)，自动发布到 Github Releases 供下载
+      - name: Upload to GitHub Releases
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ env.APP_NAME }}-${{ matrix.os_name }}${{ matrix.suffix }}
